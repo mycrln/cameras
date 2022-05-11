@@ -1,0 +1,5 @@
+train: /content/train/
+val: /content/val/
+
+nc: 1
+names: ['green_person']
