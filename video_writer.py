@@ -5,75 +5,43 @@ import time
 import cv2
 
 
-class KeyClipWriter:
-    def __init__(self, bufSize=10, timeout=1.0):
-        # store the maximum buffer size of frames to be kept
-        # in memory along with the sleep timeout during threading
-        self.bufSize = bufSize
-        self.timeout = timeout
-        # initialize the buffer of frames, queue of frames that
-        # need to be written to file, video writer, writer thread,
-        # and boolean indicating whether recording has started or not
-        self.frames = deque(maxlen=bufSize)
-        self.Q = None
+class VideoWriter:
+    def __init__(self, buf_size=120):
+        self.bufSize = buf_size
+        self.buffer = deque(maxlen=buf_size)
+        self.result_video_frames = []
         self.writer = None
-        self.thread = None
-        self.recording = False
 
-    def update(self, frame):
-            # update the frames buffer
-            self.frames.appendleft(frame)
-            # if we are recording, update the queue as well
-            if self.recording:
-                self.Q.put(frame)
+    def update_buffer(self, frame):
+        '''
+        Save buffers frames (10 seconds)
+        '''
 
-    def start(self, outputPath, fourcc, fps, ocup_video_frames):
-        # indicate that we are recording, start the video writer,
-        # and initialize the queue of frames that need to be written
-        # to the video file
-        print(self.frames)
-        self.recording = True
-        self.writer = cv2.VideoWriter(outputPath, fourcc, fps, (self.frames[0].shape[1], self.frames[0].shape[0]), True)
-        self.Q = Queue()
-        # loop over the frames in the deque structure and add them
-        # to the queue
-        for i in range(len(self.frames), 0, -1):
-            self.Q.put(self.frames[i - 1])
-        for frame in ocup_video_frames:
-            self.Q.put(frame)
-        # start a thread write frames to the video file
-        self.thread = Thread(target=self.write, args=())
-        self.thread.daemon = True
-        self.thread.start()
+        self.buffer.append(frame)
 
-    def write(self):
+    def save_video(self, output_path, fourcc, fps, detect_video_frames):
+        '''
+        Concatenate buffers frames and video frames
+        '''
+
+        self.result_video_frames = list(self.buffer) + detect_video_frames
+        self.writer = cv2.VideoWriter(output_path, fourcc, fps, (self.result_video_frames[0].shape[1],
+                                                                 self.result_video_frames[0].shape[0]), True)
+        self.buffer.clear()
+        self.write_video()
+
+    def write_video(self):
+        '''
+        Write video frames to .ivi video format when detected.
+        '''
+
         # keep looping
-        while True:
-            # if we are done recording, exit the thread
-            if not self.recording:
-                return
-            # check to see if there are entries in the queue
-            if not self.Q.empty():
-                # grab the next frame in the queue and write it
-                # to the video file
-                frame = self.Q.get()
-                self.writer.write(frame)
-            # otherwise, the queue is empty, so sleep for a bit
-            # so we don't waste CPU cycles
-            else:
-                time.sleep(self.timeout)
+        if len(self.result_video_frames) != 0:
+            print(f"Количество кадров в записи: {len(self.result_video_frames)}")
+            print(f"Количество секунд в записи: {len(self.result_video_frames) / 24}")
 
-    def flush(self):
-            # empty the queue by flushing all remaining frames to file
-            while not self.Q.empty():
-                frame = self.Q.get()
+            for frame in self.result_video_frames:
                 self.writer.write(frame)
 
-    def finish(self):
-        # indicate that we are done recording, join the thread,
-        # flush all remaining frames in the queue to file, and
-        # release the writer pointer
-        self.recording = False
-        self.thread.join()
-        self.flush()
-        self.writer.release()
+            self.writer.release()
+            self.result_video_frames.clear()

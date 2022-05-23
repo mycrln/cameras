@@ -4,11 +4,11 @@ import time
 from datetime import datetime
 import cv2
 
-from video_writer import KeyClipWriter
+from video_writer import VideoWriter
 
 ap = argparse.ArgumentParser()
 ap.add_argument("-v", "--video", default=0, help="path to the video file")
-ap.add_argument("-a", "--min-area", type=int, default=5000, help="minimum area size")
+ap.add_argument("-a", "--contour-min-area", type=int, default=5000, help="minimum area size objects contour")
 
 ap.add_argument("-o", "--output", required=False, default='./', help="path to output directory")
 ap.add_argument("-f", "--fps", type=int, default=20, help="FPS of output video")
@@ -20,16 +20,18 @@ args = vars(ap.parse_args())
 if args["video"]:
     vs = cv2.VideoCapture(args["video"])
 else:
-    vs = cv2.VideoCapture("rtsp://192.168.1.10/user=admin_password=12345678A_channel=1_stream=0.sdp?real_stream")
+    vs = cv2.VideoCapture(0)
+
+#"rtsp://192.168.1.10/user=admin_password=12345678A_channel=1_stream=0.sdp?real_stream"
 
 first_frame = None
 avg = None
-kcw = KeyClipWriter(bufSize=args["buffer_size"])
-consec_frames = 0
-not_ocup_count = 0
-not_ocup_max = 1000
-occupy = False
-ocup_video_frames = []
+video_writer = VideoWriter(buf_size=args["buffer_size"])
+not_occupy_frame_count = 0  # количество кадров без окупации
+max_not_occupy_frame_count = 120    # максимальный промежуток простоя в видеозаписи
+occupy = False  # флаг оккупации
+occupy_video_frames = []    # оккупированные кадры
+update_buffer_before_write_stream = True    # добавление в буфер
 
 while True:
     if args["video"]:
@@ -37,15 +39,11 @@ while True:
     else:
         ret, frame = vs.read()
 
-    # frame = frame if args.get("video", None) is None else frame[1]
-    text = "Unoccupied"
-
-    update_consec_frames = True
-    if update_consec_frames:
-        kcw.update(frame)   # Update buffer before occupied
-
     if frame is None:
         break
+
+    # frame = frame if args.get("video", None) is None else frame[1]
+    text = "Unoccupied"
 
     frame = imutils.resize(frame, width=1500)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -58,56 +56,52 @@ while True:
         first_frame = gray
         continue
 
-    cv2.accumulateWeighted(gray, avg, 0.15)
+    avg = cv2.accumulateWeighted(gray, avg, 0.15)
 
     frameDelta = cv2.absdiff(gray, cv2.convertScaleAbs(avg))
     thresh = cv2.threshold(frameDelta, 25, 255, cv2.THRESH_BINARY)[1]
-
     thresh = cv2.dilate(thresh, None, iterations=5)
+    contours = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = imutils.grab_contours(contours)
 
-    cnts = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL,
-                            cv2.CHAIN_APPROX_SIMPLE)
-    cnts = imutils.grab_contours(cnts)
+    for contour in contours:
+        update_buffer_before_write_stream = False
 
-    if occupy is False:
-        not_ocup_count += 1
-
-    for c in cnts:
-
-        if cv2.contourArea(c) < args["min_area"]:
-            update_consec_frames = False
+        if cv2.contourArea(contour) < args["contour_min_area"]:
             occupy = False
+            update_buffer_before_write_stream = True
             continue
 
-        occupy = True
-        update_consec_frames = True
-        ocup_video_frames.append(frame)
-
-        # Delete frames if not ocupied
-        if not_ocup_count > not_ocup_max:
-            not_ocup_count = 0
-            if kcw.recording:
-                kcw.finish()
-            ocup_video_frames.clear()
-
-        (x, y, w, h) = cv2.boundingRect(c)
+        (x, y, w, h) = cv2.boundingRect(contour)
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 1)
         text = "Occupied"
+        occupy = True
+        break
 
-        # print(datetime.now())
-        # update the key frame clip buffer
-        # if we are recording and reached a threshold on consecutive
-        # number of frames with no action, stop recording the clip
-        #if kcw.recording:# and consecFrames == args["buffer_size"]:
+    if update_buffer_before_write_stream and (occupy and len(occupy_video_frames) == 0):
+        video_writer.update_buffer(frame)   # Update buffer before occupied
 
-    if not kcw.recording:
+    if occupy:
+        not_occupy_frame_count = 0
+        occupy_video_frames.append(frame)
+
+    if not occupy and len(occupy_video_frames) != 0:
+        occupy_video_frames.append(frame)
+
+    if not occupy:
+        not_occupy_frame_count += 1
+
+    # if not_occupy_frame_count < max_not_occupy_frame_count:
+    #     occupy_video_frames.append(frame)
+    if not_occupy_frame_count > max_not_occupy_frame_count and len(occupy_video_frames) != 0:
         timestamp = datetime.now()
         p = f"{args['output']}/{timestamp.strftime('%Y%m%d-%H%M%S')}.avi"
-        kcw.start(p, cv2.VideoWriter_fourcc(*args["codec"]), args["fps"], ocup_video_frames)
+        video_writer.save_video(p, cv2.VideoWriter_fourcc(*args["codec"]), args["fps"], occupy_video_frames)
+        occupy_video_frames.clear()
+        not_occupy_frame_count = 0
+        print('Video saved.')
 
-    cv2.putText(frame, f"Room Status: {text}", (10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-
+    frame = cv2.putText(frame, f"{text}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
     cv2.imshow("Thresh", thresh)
     cv2.imshow("Frame Delta", frameDelta)
     cv2.imshow("Security Feed", frame)
@@ -120,4 +114,5 @@ while True:
 
 if args["video"]:
     vs.stop() if args.get("video", None) is None else vs.release()
+
 cv2.destroyAllWindows()
